@@ -27,7 +27,7 @@ const POSTS_PER_PAGE = 20;
 const UPLOAD_LIMIT = 10 * 1024 * 1024;
 
 // memcached session
-$memd_addr = '127.0.0.1:11211';
+$memd_addr = 'memcached:11211';
 if (isset($_SERVER['ISUCONP_MEMCACHED_ADDRESS'])) {
     $memd_addr = $_SERVER['ISUCONP_MEMCACHED_ADDRESS'];
 }
@@ -58,6 +58,11 @@ $container->set('db', function ($c) {
         $config['db']['password']
     );
 });
+$container->set('mc', function($c) {
+    $mc = new Memcached();
+    $mc->addServer('memcached', 11211, 0);
+    return $mc;
+});
 
 $container->set('view', function ($c) {
     return new class(__DIR__ . '/views/') extends \Slim\Views\PhpRenderer {
@@ -75,13 +80,19 @@ $container->set('flash', function () {
 $container->set('helper', function ($c) {
     return new class($c) {
         public PDO $db;
+        public Memcached $mc;
 
         public function __construct($c) {
             $this->db = $c->get('db');
+            $this->mc = $c->get('mc');
         }
 
         public function db() {
             return $this->db;
+        }
+
+        public function mc() {
+            return $this->mc;
         }
 
         public function db_initialize() {
@@ -99,9 +110,9 @@ $container->set('helper', function ($c) {
 
         public function fetch_first($query, ...$params) {
             $db = $this->db();
-            $ps = $db->prepare($query);
-            $ps->execute($params);
-            $result = $ps->fetch();
+            $ps = $db->prepare($query); #prepared statement
+            $ps->execute($params); 
+            $result = $ps->fetch(); 
             $ps->closeCursor();
             return $result;
         }
@@ -128,6 +139,10 @@ $container->set('helper', function ($c) {
         }
 
         public function make_posts(array $results, $options = []) {
+            /*
+                params
+                array $results: 
+            */
             $options += ['all_comments' => false];
             $all_comments = $options['all_comments'];
 
@@ -327,10 +342,21 @@ $app->get('/posts', function (Request $request, Response $response) {
 });
 
 $app->get('/posts/{id}', function (Request $request, Response $response, $args) {
-    $db = $this->get('db');
-    $ps = $db->prepare('SELECT * FROM `posts` WHERE `id` = ?');
-    $ps->execute([$args['id']]);
-    $results = $ps->fetchAll(PDO::FETCH_ASSOC);
+    //まずキャッシュにアクセス
+    $mc = $this->get('mc');
+    $results = $mc->get($args['id']);
+    $id = $args['id'];
+    //ヒットしなかった場合はDBにクエリ
+    if(!$results) {
+        $db = $this->get('db');
+        $ps = $db->prepare('SELECT * FROM `posts` WHERE `id` = ?');
+        $ps->execute([$args['id']]);
+        $results = $ps->fetchAll(PDO::FETCH_ASSOC);
+        $mc->set($results[0]['id'], $results[0], 0);
+    }
+    else {
+        $results = [$results];
+    }
     $posts = $this->get('helper')->make_posts($results, ['all_comments' => true]);
 
     if (count($posts) == 0) {
@@ -387,6 +413,7 @@ $app->post('/', function (Request $request, Response $response) {
           $params['body'],
         ]);
         $pid = $db->lastInsertId();
+
         return redirect($response, "/posts/{$pid}", 302);
     } else {
         $this->get('flash')->addMessage('notice', '画像が必須です');
@@ -399,7 +426,13 @@ $app->get('/image/{id}.{ext}', function (Request $request, Response $response, $
         return $response;
     }
 
-    $post = $this->get('helper')->fetch_first('SELECT * FROM `posts` WHERE `id` = ?', $args['id']);
+    //画像キャッシュの照会
+    $mc = $this->get('mc');
+    $post = $mc->get($args['id']);
+    if(!$post) {
+        $post = $this->get('helper')->fetch_first('SELECT * FROM `posts` WHERE `id` = ?', $args['id']);
+        $mc->set($args['id'], $post, 0);
+    }
 
     if (($args['ext'] == 'jpg' && $post['mime'] == 'image/jpeg') ||
         ($args['ext'] == 'png' && $post['mime'] == 'image/png') ||
