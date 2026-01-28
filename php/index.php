@@ -139,30 +139,29 @@ $container->set('helper', function ($c) {
         }
 
         public function make_posts(array $results, $options = []) {
-            /*
-                params
-                array $results: 
-            */
+            
             $options += ['all_comments' => false];
             $all_comments = $options['all_comments'];
 
             $posts = [];
             foreach ($results as $post) {
-                $post['comment_count'] = $this->fetch_first('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', $post['id'])['count'];
+
                 $query = 'SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC';
-                if (!$all_comments) {
-                    $query .= ' LIMIT 3';
-                }
 
                 $ps = $this->db()->prepare($query);
                 $ps->execute([$post['id']]);
                 $comments = $ps->fetchAll(PDO::FETCH_ASSOC);
+                $post['comment_count'] = count($comments);
+
+                if(!$all_comments) {
+                    $comments = array_slice($comments, 0, 3);
+                }
+
                 foreach ($comments as &$comment) {
                     $comment['user'] = $this->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $comment['user_id']);
                 }
                 unset($comment);
                 $post['comments'] = array_reverse($comments);
-
                 $post['user'] = $this->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $post['user_id']);
                 if ($post['user']['del_flg'] == 0) {
                     $posts[] = $post;
@@ -314,13 +313,13 @@ $app->get('/logout', function (Request $request, Response $response) {
 });
 
 $app->get('/', function (Request $request, Response $response) {
-    $me = $this->get('helper')->get_session_user();
 
+    $me = $this->get('helper')->get_session_user();
     $db = $this->get('db');
     $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC');
     $ps->execute();
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
-    $posts = $this->get('helper')->make_posts($results);
+    $posts = $this->get('helper')->make_posts($results); //ここが重い
 
     return $this->get('view')->render($response, 'index.php', [
         'posts' => $posts,
